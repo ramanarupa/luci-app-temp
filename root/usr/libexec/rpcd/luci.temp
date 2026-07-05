@@ -1,0 +1,119 @@
+#!/bin/sh
+# luci-app-temp — rpcd backend exposing temperature/fan sensors as ubus object "luci.temp"
+
+. /usr/share/libubox/jshn.sh
+
+get_data() {
+	json_init
+
+	json_add_array sensors
+
+	# Thermal zones (SoC/CPU)
+	for zone in /sys/class/thermal/thermal_zone*; do
+		[ -r "$zone/temp" ] || continue
+		temp=$(cat "$zone/temp" 2>/dev/null)
+		[ -n "$temp" ] || continue
+		type=$(cat "$zone/type" 2>/dev/null)
+		json_add_object ""
+		json_add_string id "${zone##*/}"
+		json_add_string name "${type:-${zone##*/}}"
+		json_add_string source "thermal"
+		json_add_int temp "$temp"
+		json_close_object
+	done
+
+	# hwmon temperature inputs (WiFi radios etc.); skip hwmon devices that
+	# just mirror a thermal zone (they live under /sys/devices/virtual/thermal/)
+	for hwmon in /sys/class/hwmon/hwmon*; do
+		case "$(readlink -f "$hwmon")" in
+			*/thermal/thermal_zone*) continue ;;
+		esac
+		name=$(cat "$hwmon/name" 2>/dev/null)
+		for t in "$hwmon"/temp*_input; do
+			[ -r "$t" ] || continue
+			temp=$(cat "$t" 2>/dev/null)
+			[ -n "$temp" ] || continue
+			tbase="${t%_input}"
+			label=""
+			[ -r "${tbase}_label" ] && label=$(cat "${tbase}_label" 2>/dev/null)
+			json_add_object ""
+			json_add_string id "${hwmon##*/}_${tbase##*/}"
+			json_add_string name "${name:-${hwmon##*/}}${label:+ ($label)}"
+			json_add_string source "hwmon"
+			json_add_int temp "$temp"
+			json_close_object
+		done
+	done
+
+	json_close_array
+
+	# Fans. Preferred sources, in order:
+	#   1) fan*_input (real tachometer RPM)
+	#   2) thermal cooling-device state (honest fan level; raw pwm* can be
+	#      inverted via DTS cooling-levels, e.g. BPI-R3 <255 40 0>: 255 = OFF)
+	#   3) raw pwm* duty — only if no fan cooling device exists
+	json_add_array fans
+	have_fan_cdev=""
+	for cd in /sys/class/thermal/cooling_device*; do
+		[ -r "$cd/type" ] || continue
+		ctype=$(cat "$cd/type" 2>/dev/null)
+		case "$ctype" in
+			*fan*) ;;
+			*) continue ;;
+		esac
+		cur=$(cat "$cd/cur_state" 2>/dev/null)
+		max=$(cat "$cd/max_state" 2>/dev/null)
+		[ -n "$cur" ] && [ -n "$max" ] || continue
+		have_fan_cdev=1
+		json_add_object ""
+		json_add_string id "${cd##*/}"
+		json_add_string name "$ctype"
+		json_add_int state "$cur"
+		json_add_int max_state "$max"
+		json_close_object
+	done
+	for hwmon in /sys/class/hwmon/hwmon*; do
+		name=$(cat "$hwmon/name" 2>/dev/null)
+		for f in "$hwmon"/fan*_input; do
+			[ -r "$f" ] || continue
+			rpm=$(cat "$f" 2>/dev/null)
+			[ -n "$rpm" ] || continue
+			json_add_object ""
+			json_add_string id "${hwmon##*/}_${f##*/}"
+			json_add_string name "${name:-${hwmon##*/}}"
+			json_add_int rpm "$rpm"
+			json_close_object
+		done
+		[ -n "$have_fan_cdev" ] && continue
+		for p in "$hwmon"/pwm[0-9] "$hwmon"/pwm[0-9][0-9]; do
+			[ -r "$p" ] || continue
+			duty=$(cat "$p" 2>/dev/null)
+			[ -n "$duty" ] || continue
+			json_add_object ""
+			json_add_string id "${hwmon##*/}_${p##*/}"
+			json_add_string name "${name:-${hwmon##*/}}"
+			json_add_int pwm "$duty"
+			json_close_object
+		done
+	done
+	json_close_array
+
+	json_dump
+}
+
+case "$1" in
+	list)
+		echo '{ "getData": {} }'
+	;;
+	call)
+		case "$2" in
+			getData)
+				read -r _input 2>/dev/null
+				get_data
+			;;
+			*)
+				echo '{}'
+			;;
+		esac
+	;;
+esac

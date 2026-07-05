@@ -1,0 +1,14 @@
+{
+	"luci-app-temp": {
+		"description": "Grant access to temperature sensors (luci-app-temp)",
+		"read": {
+			"ubus": {
+				"luci.temp": [ "getData" ]
+			},
+			"uci": [ "luci_temp" ]
+		},
+		"write": {
+			"uci": [ "luci_temp" ]
+		}
+	}
+}

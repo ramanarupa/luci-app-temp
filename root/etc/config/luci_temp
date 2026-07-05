@@ -1,0 +1,4 @@
+config settings 'settings'
+	option poll_interval '5'
+	option warn_temp '60'
+	option crit_temp '75'
